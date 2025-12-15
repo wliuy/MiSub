@@ -4,34 +4,11 @@
  */
 
 import { StorageFactory } from '../storage-adapter.js';
-import { createJsonResponse } from './utils.js';
+import { createJsonResponse, createErrorResponse } from './utils.js';
 import { authMiddleware, handleLogin, handleLogout, createUnauthorizedResponse } from './auth-middleware.js';
 import { sendTgNotification, checkAndNotify } from './notifications.js';
 
-// 常量定义
-const OLD_KV_KEY = 'misub_data_v1';
-const KV_KEY_SUBS = 'misub_subscriptions_v1';
-const KV_KEY_PROFILES = 'misub_profiles_v1';
-const KV_KEY_SETTINGS = 'worker_settings_v1';
-
-// 默认设置
-const defaultSettings = {
-    FileName: 'MiSub',
-    mytoken: 'auto',
-    profileToken: 'profiles',
-    subConverter: 'url.v1.mk',
-    subConfig: 'https://raw.githubusercontent.com/cmliu/ACL4SSR/refs/heads/main/Clash/config/ACL4SSR_Online_Full.ini',
-    prependSubName: true,
-    prefixConfig: {
-        enableManualNodes: true,
-        enableSubscriptions: true,
-        manualNodePrefix: '手动节点',
-        enableNodeEmoji: true
-    },
-    NotifyThresholdDays: 3,
-    NotifyThresholdPercent: 90,
-    storageType: 'kv'
-};
+import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS, DEFAULT_SETTINGS as defaultSettings } from './config.js';
 
 /**
  * 获取存储适配器实例
@@ -64,7 +41,7 @@ export async function handleDataRequest(env) {
         return createJsonResponse({ misubs, profiles, config });
     } catch (e) {
         console.error('[API Error /data]', 'Failed to read from storage:', e);
-        return createJsonResponse({ error: '读取初始数据失败' }, 500);
+        return createErrorResponse('读取初始数据失败', 'APIHandler', 500);
     }
 }
 
@@ -174,7 +151,7 @@ export async function handleSettingsGet(env) {
         const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
         return createJsonResponse({ ...defaultSettings, ...settings });
     } catch (e) {
-        return createJsonResponse({ error: '读取设置失败' }, 500);
+        return createErrorResponse('读取设置失败', 'APIHandler', 500);
     }
 }
 
@@ -199,6 +176,6 @@ export async function handleSettingsSave(request, env) {
 
         return createJsonResponse({ success: true, message: '设置已保存' });
     } catch (e) {
-        return createJsonResponse({ error: '保存设置失败' }, 500);
+        return createErrorResponse('保存设置失败', 'APIHandler', 500);
     }
 }
