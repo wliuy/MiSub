@@ -1,17 +1,22 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import draggable from 'vuedraggable';
 import Card from '../ui/Card.vue';
 
 const props = defineProps({
-  subscriptions: Array,
+  subscriptions: { type: Array, default: () => [] },
   paginatedSubscriptions: Array,
   currentPage: Number,
   totalPages: Number,
   isSorting: Boolean,
 });
 
-const emit = defineEmits(['add', 'delete', 'changePage', 'updateNodeCount', 'edit', 'toggleSort', 'markDirty', 'preview', 'deleteAll', 'refreshAll']);
+const emit = defineEmits(['add', 'delete', 'changePage', 'updateNodeCount', 'edit', 'toggleSort', 'markDirty', 'preview', 'deleteAll', 'refreshAll', 'reorder']);
+
+const draggableSubscriptions = computed({
+    get: () => [...props.subscriptions],
+    set: (val) => emit('reorder', val)
+});
 
 const subsMoreMenuRef = ref(null);
 const showSubsMoreMenu = ref(false);
@@ -85,7 +90,7 @@ onUnmounted(() => {
         v-if="isSorting" 
         tag="div" 
         class="grid grid-cols-1 md:grid-cols-2 gap-5" 
-        :list="subscriptions" 
+        v-model="draggableSubscriptions" 
         item-key="id"
         animation="300" 
         @end="handleSortEnd">

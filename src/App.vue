@@ -6,8 +6,15 @@ import { useToastStore } from './stores/toast';
 import { storeToRefs } from 'pinia';
 
 // 懒加载大型组件以提升性能
-const Dashboard = defineAsyncComponent(() => import('./components/features/Dashboard/Dashboard.vue'));
 const DashboardSkeleton = defineAsyncComponent(() => import('./components/layout/DashboardSkeleton.vue'));
+const Dashboard = defineAsyncComponent({
+  loader: () => import('./components/features/Dashboard/Dashboard.vue'),
+  loadingComponent: DashboardSkeleton,
+  errorComponent: {
+    template: '<div class="p-4 text-red-500 text-center">Failed to load Dashboard component. Check console for details.</div>'
+  },
+  timeout: 3000
+});
 const Login = defineAsyncComponent(() => import('./components/modals/Login.vue'));
 const Header = defineAsyncComponent(() => import('./components/layout/Header.vue'));
 const Toast = defineAsyncComponent(() => import('./components/ui/Toast.vue'));
@@ -55,8 +62,9 @@ onMounted(() => {
         'ios-content-offset': sessionState === 'loggedIn' || sessionState === 'loading'
       }"
     >
+
       <DashboardSkeleton v-if="sessionState === 'loading'" />
-      <Dashboard v-else-if="sessionState === 'loggedIn' && initialData" :data="initialData" />
+      <Dashboard v-else-if="sessionState === 'loggedIn'" :data="initialData || {}" />
       <Login v-else :login="login" />
     </main>
     

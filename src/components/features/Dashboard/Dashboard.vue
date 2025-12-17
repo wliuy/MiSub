@@ -32,6 +32,7 @@ const dataStore = useDataStore();
 const { settings, isDirty, isLoading } = storeToRefs(dataStore); // Use store refs
 const config = settings; // Compatibility alias for template
 const { clearDirty } = dataStore; // Don't destructure markDirty directly
+console.log('Dashboard: setup running');
 
 const saveState = ref('idle');
 
@@ -43,30 +44,33 @@ const markDirty = () => {
 
 // --- 將狀態和邏輯委託給 Composables ---
 // Composables now use global store, so we don't pass refs
+// --- UI State ---
+const isSortingSubs = ref(false);
+const isSortingNodes = ref(false);
+const manualNodeViewMode = ref('card');
+
 const {
   subscriptions, subsCurrentPage, subsTotalPages, paginatedSubscriptions, totalRemainingTraffic,
   changeSubsPage, addSubscription, updateSubscription, deleteSubscription, deleteAllSubscriptions,
   addSubscriptionsFromBulk, handleUpdateNodeCount, batchUpdateAllSubscriptions, startAutoUpdate, stopAutoUpdate,
+  reorderSubscriptions, 
 } = useSubscriptions(markDirty);
 
 const {
   manualNodes, manualNodesCurrentPage, manualNodesTotalPages, paginatedManualNodes, searchTerm,
   changeManualNodesPage, addNode, updateNode, deleteNode, deleteAllNodes,
   addNodesFromBulk, autoSortNodes, deduplicateNodes,
+  reorderManualNodes, 
 } = useManualNodes(markDirty);
 
-// --- 訂閱組 (Profile) 相關狀態 ---
 const {
   profiles, editingProfile, isNewProfile, showProfileModal, showDeleteProfilesModal,
   initializeProfiles, handleProfileToggle, handleAddProfile, handleEditProfile,
   handleSaveProfile, handleDeleteProfile, handleDeleteAllProfiles, copyProfileLink,
   cleanupSubscriptions, cleanupNodes, cleanupAllSubscriptions, cleanupAllNodes,
-} = useProfiles(markDirty); // config is now in store
-
+} = useProfiles(markDirty);
 // --- UI State ---
-const isSortingSubs = ref(false);
-const isSortingNodes = ref(false);
-const manualNodeViewMode = ref('card');
+
 const editingSubscription = ref(null);
 const isNewSubscription = ref(false);
 const showSubModal = ref(false);
@@ -89,8 +93,17 @@ const previewProfileName_ = ref(''); // fix potential unused var or re-usage
 
 // --- 初始化與生命週期 ---
 const initializeState = async () => {
-    await dataStore.fetchData();
-    clearDirty();
+    console.log('Dashboard: initializeState started');
+    try {
+        await dataStore.fetchData();
+        console.log('Dashboard: fetchData completed', { 
+            subs: subscriptions.value?.length, 
+            nodes: manualNodes.value?.length 
+        });
+        clearDirty();
+    } catch (e) {
+        console.error('Dashboard: initializeState error', e);
+    }
 };
 
 const handleBeforeUnload = (event) => {
@@ -355,6 +368,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
 </script>
 
 <template>
+
   <div v-if="isLoading" class="w-full max-w-(--breakpoint-xl) mx-auto p-4 sm:p-6 lg:p-8">
     <SkeletonLoader type="dashboard" />
   </div>
@@ -421,6 +435,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           @mark-dirty="markDirty"
           @delete-all="showDeleteSubsModal = true"
           @preview="handlePreviewSubscription"
+          @reorder="reorderSubscriptions"
         />
 
         <!-- Manual Node Panel -->
@@ -444,6 +459,7 @@ const formattedTotalRemainingTraffic = computed(() => formatBytes(totalRemaining
           @deduplicate="handleDeduplicateNodes"
           @import="showSubscriptionImportModal = true"
           @delete-all="showDeleteNodesModal = true"
+          @reorder="reorderManualNodes"
         />
       </div>
       

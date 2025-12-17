@@ -1,11 +1,11 @@
 <script setup>
-import { ref, watch, nextTick } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import draggable from 'vuedraggable';
 import ManualNodeCard from './ManualNodeCard.vue';
 import ManualNodeList from './ManualNodeList.vue';
 
 const props = defineProps({
-  manualNodes: Array,
+  manualNodes: { type: Array, default: () => [] },
   paginatedManualNodes: Array,
   currentPage: Number,
   totalPages: Number,
@@ -16,15 +16,20 @@ const props = defineProps({
 
 const emit = defineEmits([
   'add', 'delete', 'edit', 'changePage', 'update:searchTerm', 'update:viewMode',
-  'toggleSort', 'markDirty', 'autoSort', 'deduplicate', 'import', 'deleteAll'
+  'toggleSort', 'markDirty', 'autoSort', 'deduplicate', 'import', 'deleteAll', 'reorder'
 ]);
+
+const draggableManualNodes = computed({
+  get: () => [...props.manualNodes],
+  set: (val) => emit('reorder', val)
+});
 
 const nodesMoreMenuRef = ref(null);
 const showNodesMoreMenu = ref(false);
 const localSearchTerm = ref(props.searchTerm || '');
 
 // 简化搜索逻辑 - 直接在组件内处理
-import { computed } from 'vue';
+
 
 // 在组件内部直接计算过滤结果
 const filteredNodes = computed(() => {
@@ -198,7 +203,7 @@ const handleClickOutside = (event) => {
 };
 
 // 在组件挂载和卸载时添加/移除事件监听器
-import { onMounted, onUnmounted } from 'vue';
+
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);
@@ -271,7 +276,7 @@ onUnmounted(() => {
           v-if="isSorting"
           tag="div" 
           class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3" 
-          :list="manualNodes" 
+          v-model="draggableManualNodes" 
           item-key="id" 
           animation="300" 
           @end="handleSortEnd"
@@ -305,7 +310,7 @@ onUnmounted(() => {
           v-if="isSorting"
           tag="div" 
           class="space-y-2" 
-          :list="manualNodes" 
+          v-model="draggableManualNodes" 
           item-key="id" 
           animation="300" 
           @end="handleSortEnd"
