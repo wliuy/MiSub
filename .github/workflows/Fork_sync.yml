@@ -1,44 +1,53 @@
-name: Fork Sync
+name: Upstream Sync
 
 permissions:
-    contents: write
+  contents: write
+  actions: write
 
 on:
-    schedule:
-        - cron: "0 0 * * *"  # 每天午夜执行
-    workflow_dispatch:  # 允许手动触发
+  schedule:
+    - cron: "0 2 * * *" # 每天北京时间上午10点运行
+  workflow_dispatch: # 允许手动点击按钮运行
 
 jobs:
-    sync_with_upstream:
-        name: Sync with Upstream
-        runs-on: ubuntu-latest
-        if: ${{ github.event.repository.fork }}
+  sync_latest_from_upstream:
+    name: Sync latest commits from upstream repo
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
 
-        steps:
-            - name: Checkout target repo
-              uses: actions/checkout@v4
-              with:
-                token: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # 1. 检出代码
+      - name: Checkout target repo
+        uses: actions/checkout@v4
 
-            - name: Sync Upstream
-              uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
-              with:
-                  target_repo_token: ${{ secrets.GITHUB_TOKEN }}
-                  upstream_sync_repo: imzyb/MiSub
-                  upstream_sync_branch: main
-                  target_sync_branch: main
-                  test_mode: false
+      # 2. 同步核心步骤
+      - name: Sync upstream changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          # 👇 这里我已经帮你填好了 imzyb/MiSub 👇
+          upstream_sync_repo: imzyb/MiSub
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          test_mode: false
+          
+          # 👇 强力参数：专治各种同步报错，强制拉取作者代码
+          upstream_sync_args: '--allow-unrelated-histories --force'
 
-            - name: Check for new commits
-              if: success()
-              run: echo "Sync completed successfully"
+      # 3. 检查同步结果
+      - name: Sync check
+        if: failure()
+        run: |
+          echo "[Error] 同步失败！"
+          echo "请检查原作者仓库 (imzyb/MiSub) 是否依然存在。"
+          exit 1
 
-            - name: Check for Failure
-              if: failure()
-              run: |
-                  echo "[Error] Sync failed. This might be due to:"
-                  echo "1. Changes in the upstream workflow file"
-                  echo "2. Merge conflicts that need manual resolution"
-                  echo "3. Network issues"
-                  echo "Please check the logs and consider manual sync if needed."
-                  exit 1
+      # 4. 自动清理旧日志（只保留最近3天）
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 3
+          keep_minimum_runs: 3
