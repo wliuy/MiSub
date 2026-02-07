@@ -23,7 +23,7 @@
  */
 
 import { StorageFactory } from '../../storage-adapter.js';
-import { createJsonResponse } from '../utils.js';
+import { createJsonResponse, escapeHtml } from '../utils.js';
 import { KV_KEY_SUBS, KV_KEY_PROFILES, KV_KEY_SETTINGS } from '../config.js';
 
 // ==================== 存储与配置 ====================
@@ -180,7 +180,7 @@ async function sendTelegramMessage(chatId, text, env, options = {}) {
         });
 
         if (!response.ok) {
-            console.error('[Telegram Push] Failed to send message:', await response.text());
+            console.error('[Telegram Push] Failed to send message:', await response.clone().text());
         }
 
         return response;
@@ -302,6 +302,16 @@ async function getUserNodes(userId, env) {
     const storageAdapter = await getStorageAdapter(env);
     const allSubscriptions = await storageAdapter.get(KV_KEY_SUBS) || [];
 
+    // 检查用户是否在白名单中
+    const config = await getTelegramPushConfig(env);
+    const permission = checkUserPermission(userId, config);
+
+    // 如果用户有权限（白名单用户），则显示所有节点（包括 Web 端添加的）
+    if (permission.allowed) {
+        return allSubscriptions;
+    }
+
+    // 否则仅返回该用户通过 Telegram 添加的节点（兜底逻辑）
     return allSubscriptions.filter(sub =>
         sub.source === 'telegram' && sub.telegram_user_id === userId
     );
@@ -382,22 +392,21 @@ async function handleMenuCommand(chatId, env) {
     const keyboard = {
         inline_keyboard: [
             [
-                { text: '📋 列表', callback_data: 'cmd_list' },
-                { text: '📊 统计', callback_data: 'cmd_stats' },
-                { text: '🔍 搜索', callback_data: 'prompt_search' }
+                { text: '\uD83D\uDE80 节点列表', callback_data: 'cmd_list_node' }, // 🚀
+                { text: '\uD83D\uDCE1 订阅列表', callback_data: 'cmd_list_sub' },  // 📡
+                { text: '\uD83D\uDCCA 统计', callback_data: 'cmd_stats' }      // 📊
             ],
             [
-                { text: '🔗 绑定', callback_data: 'cmd_bind' },
-                { text: '🔄 排序', callback_data: 'prompt_sort' },
-                { text: '🧹 去重', callback_data: 'cmd_dup' }
+                { text: '\uD83D\uDD17 绑定', callback_data: 'cmd_bind' },      // 🔗
+                { text: '\uD83D\uDD0D 搜索', callback_data: 'prompt_search' }, // 🔍
+                { text: '\u2753 帮助', callback_data: 'cmd_help' }            // ❓
             ],
             [
-                { text: '✅ 全启用', callback_data: 'cmd_enable_all' },
-                { text: '⛔ 全禁用', callback_data: 'cmd_disable_all' }
+                { text: '\u2705 全启用', callback_data: 'cmd_enable_all' },    // ✅
+                { text: '\u26D4 全禁用', callback_data: 'cmd_disable_all' }    // ⛔
             ],
             [
-                { text: '❓ 帮助', callback_data: 'cmd_help' },
-                { text: '🗑️ 清空', callback_data: 'confirm_delete_all' }
+                { text: '\uD83D\uDDD1\uFE0F 清空', callback_data: 'confirm_delete_all' } // 🗑️
             ]
         ]
     };
@@ -410,13 +419,24 @@ async function handleMenuCommand(chatId, env) {
 /**
  * 处理 /list 命令 - 节点列表（带分页和操作按钮）
  */
-async function handleListCommand(chatId, userId, env, page = 0) {
+async function handleListCommand(chatId, userId, env, page = 0, type = 'all') {
     try {
         const storageAdapter = await getStorageAdapter(env);
-        const userNodes = await getUserNodes(userId, env);
+        const allNodes = await getUserNodes(userId, env);
         const profiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
         const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
         const config = settings.telegram_push_config || {};
+
+        // 过滤节点
+        let userNodes = allNodes;
+        let title = '列表';
+        if (type === 'node') {
+            userNodes = allNodes.filter(n => !/^https?:\/\//i.test(n.url || ''));
+            title = '\uD83D\uDE80 节点列表'; // 🚀
+        } else if (type === 'sub') {
+            userNodes = allNodes.filter(n => /^https?:\/\//i.test(n.url || ''));
+            title = '\uD83D\uDCE1 订阅列表'; // 📡
+        }
 
         // 获取当前绑定的订阅组
         const boundProfile = config.default_profile_id
@@ -425,7 +445,11 @@ async function handleListCommand(chatId, userId, env, page = 0) {
         const boundNodeIds = new Set(boundProfile?.manualNodes || []);
 
         if (userNodes.length === 0) {
-            await sendTelegramMessage(chatId, '📋 <b>暂无节点</b>\n\n直接发送节点链接即可添加', env);
+            let emptyMsg = `\uD83D\uDCCB <b>暂无${type === 'sub' ? '订阅' : (type === 'node' ? '节点' : '资源')}</b>\n\n`; // 📋
+            if (type === 'sub') emptyMsg += '发送包含 http/https 的链接即可添加订阅';
+            else emptyMsg += '直接发送 ss/vless 等链接即可添加节点';
+
+            await sendTelegramMessage(chatId, emptyMsg, env);
             return;
         }
 
@@ -435,19 +459,34 @@ async function handleListCommand(chatId, userId, env, page = 0) {
         const startIdx = currentPage * pageSize;
         const endIdx = Math.min(startIdx + pageSize, userNodes.length);
 
-        let message = `📋 <b>节点列表</b> (${userNodes.length} 个)\n`;
+        let message = `\uD83D\uDCCB <b>${title}</b> (${userNodes.length} 个)\n`; // 📋
         message += `第 ${currentPage + 1}/${totalPages} 页`;
         if (boundProfile) {
-            message += ` | 绑定: ${boundProfile.name}`;
+            message += ` | 绑定: ${escapeHtml(boundProfile.name)}`;
         }
         message += '\n\n';
 
         for (let i = startIdx; i < endIdx; i++) {
             const node = userNodes[i];
-            const protocol = node.url.split('://')[0].toUpperCase();
-            const status = node.enabled ? '✅' : '⛔';
-            const inProfile = boundNodeIds.has(node.id) ? '🔗' : '';
-            message += `<b>${i + 1}.</b> ${status}${inProfile} ${node.name}\n`;
+            const nodeUrl = node.url || '';
+            const isSub = /^https?:\/\//i.test(nodeUrl);
+
+            let protocol = '未知';
+            if (isSub) {
+                protocol = '订阅';
+            } else if (nodeUrl.includes('://')) {
+                try {
+                    protocol = nodeUrl.split('://')[0].toUpperCase();
+                } catch (e) {
+                    protocol = 'UNKNOWN';
+                }
+            }
+
+            const status = node.enabled ? '\u2705' : '\u26D4'; // ✅ ⛔
+            const inProfile = boundNodeIds.has(node.id) ? '\uD83D\uDD17' : ''; // 🔗
+            const typeIcon = isSub ? '\uD83D\uDCE1 ' : '\uD83D\uDE80 '; // 📡 🚀
+
+            message += `<b>${i + 1}.</b> ${status}${inProfile} ${typeIcon}${escapeHtml(node.name || '未命名')} <code>${protocol}</code>\n`;
         }
 
         message += '\n点击序号查看详情和操作';
@@ -455,20 +494,30 @@ async function handleListCommand(chatId, userId, env, page = 0) {
         // 构建按钮：当前页节点的快捷按钮
         const nodeButtons = [];
         for (let i = startIdx; i < endIdx; i++) {
+            const isSubList = type === 'sub';
+            // 如果是混合列表('all'), 检测URL; 如果明确是 'sub', 则就是sub.
+            // 但 handleListCommand 的 type 参数已经区分了 'node', 'sub', 'all'.
+            // 这里我们尽量明确:
+            const actionPrefix = (type === 'sub' || (type === 'all' && /^https?:\/\//i.test(userNodes[i].url || '')))
+                ? 'node_action_sub_'
+                : 'node_action_node_';
+
             nodeButtons.push({
                 text: `${i + 1}`,
-                callback_data: `node_action_${i}`
+                callback_data: `${actionPrefix}${i}`
             });
         }
 
         // 分页按钮
         const navButtons = [];
+        const typePrefix = type !== 'all' ? `${type}_` : '';
+
         if (currentPage > 0) {
-            navButtons.push({ text: '⬅️', callback_data: `list_page_${currentPage - 1}` });
+            navButtons.push({ text: '\u2B05\uFE0F', callback_data: `list_page_${typePrefix}${currentPage - 1}` }); // ⬅️
         }
         navButtons.push({ text: `${currentPage + 1}/${totalPages}`, callback_data: 'noop' });
         if (currentPage < totalPages - 1) {
-            navButtons.push({ text: '➡️', callback_data: `list_page_${currentPage + 1}` });
+            navButtons.push({ text: '\u27A1\uFE0F', callback_data: `list_page_${typePrefix}${currentPage + 1}` }); // ➡️
         }
 
         const keyboard = {
@@ -478,10 +527,17 @@ async function handleListCommand(chatId, userId, env, page = 0) {
             ]
         };
 
-        await sendTelegramMessage(chatId, message, env, { reply_markup: keyboard });
+        const response = await sendTelegramMessage(chatId, message, env, { reply_markup: keyboard });
+
+        // 错误处理：如果发送失败（如 HTML 解析错误），回退到纯文本报错
+        if (response && !response.ok) {
+            const errText = await response.text();
+            console.error('[Telegram Push] List send failed:', errText);
+            await sendTelegramMessage(chatId, `\u274C <b>列表显示因错误中断</b>\n\n可能原因：HTML 解析错误 (特殊字符)\nTelegram 返回: ${escapeHtml(errText)}`, env);
+        }
     } catch (error) {
         console.error('[Telegram Push] List command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 获取列表失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `\u274C 获取列表失败: ${error.message}`, env); // ❌
     }
 }
 
@@ -491,21 +547,39 @@ async function handleListCommand(chatId, userId, env, page = 0) {
 async function handleStatsCommand(chatId, userId, env) {
     try {
         const userNodes = await getUserNodes(userId, env);
-        const enabledNodes = userNodes.filter(n => n.enabled);
 
+        let subCount = 0;
+        let nodeCount = 0;
+        let enabledCount = 0;
         const protocolCounts = {};
+
         userNodes.forEach(node => {
-            const protocol = node.url.split('://')[0].toUpperCase();
-            protocolCounts[protocol] = (protocolCounts[protocol] || 0) + 1;
+            const isSub = /^https?:\/\//i.test(node.url);
+
+            if (isSub) {
+                subCount++;
+            } else {
+                nodeCount++;
+                const protocol = node.url.split('://')[0].toUpperCase();
+                protocolCounts[protocol] = (protocolCounts[protocol] || 0) + 1;
+            }
+
+            if (node.enabled) enabledCount++;
         });
 
-        let message = `📊 <b>节点统计</b>\n\n`;
-        message += `总节点数: <b>${userNodes.length}</b>\n`;
-        message += `已启用: <b>${enabledNodes.length}</b>\n`;
-        message += `已禁用: <b>${userNodes.length - enabledNodes.length}</b>\n\n`;
+        const disabledCount = userNodes.length - enabledCount;
+
+        let message = `\uD83D\uDCCA <b>统计信息</b>\n\n`; // 📊
+        message += `资源总数: <b>${userNodes.length}</b>\n`;
+        message += `├─ 订阅源: <b>${subCount}</b>\n`;
+        message += `└─ 手动节点: <b>${nodeCount}</b>\n\n`;
+
+        message += `状态:\n`;
+        message += `\u2705 已启用: <b>${enabledCount}</b>\n`; // ✅
+        message += `\u26D4 已禁用: <b>${disabledCount}</b>\n\n`; // ⛔
 
         if (Object.keys(protocolCounts).length > 0) {
-            message += `<b>协议分布：</b>\n`;
+            message += `<b>节点协议分布：</b>\n`;
             Object.entries(protocolCounts)
                 .sort((a, b) => b[1] - a[1])
                 .forEach(([protocol, count]) => {
@@ -516,7 +590,7 @@ async function handleStatsCommand(chatId, userId, env) {
         await sendTelegramMessage(chatId, message, env);
     } catch (error) {
         console.error('[Telegram Push] Stats command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 获取统计失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `\u274C 获取统计失败: ${error.message}`, env); // ❌
     }
 }
 
@@ -570,6 +644,14 @@ async function handleDeleteCommand(chatId, userId, args, env) {
             return;
         }
 
+        // 收集要删除的 ID
+        const deletedIds = [];
+        for (const idx of indicesToDelete) {
+            if (allSubscriptions[idx]) {
+                deletedIds.push(allSubscriptions[idx].id);
+            }
+        }
+
         // 删除节点（从后往前删除以保持索引正确）
         indicesToDelete.sort((a, b) => b - a);
         const deletedNames = [];
@@ -579,6 +661,37 @@ async function handleDeleteCommand(chatId, userId, args, env) {
         }
 
         await storageAdapter.put(KV_KEY_SUBS, allSubscriptions);
+
+        // 3. 清理订阅组中的引用
+        try {
+            const profiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
+            if (profiles.length > 0) {
+                let profilesUpdated = false;
+                const idsToRemove = new Set(deletedIds);
+
+                profiles.forEach(profile => {
+                    // 清理 manualNodes
+                    if (Array.isArray(profile.manualNodes)) {
+                        const prevLen = profile.manualNodes.length;
+                        profile.manualNodes = profile.manualNodes.filter(id => !idsToRemove.has(id));
+                        if (profile.manualNodes.length !== prevLen) profilesUpdated = true;
+                    }
+                    // 清理 subscriptions
+                    if (Array.isArray(profile.subscriptions)) {
+                        const prevLen = profile.subscriptions.length;
+                        profile.subscriptions = profile.subscriptions.filter(id => !idsToRemove.has(id));
+                        if (profile.subscriptions.length !== prevLen) profilesUpdated = true;
+                    }
+                });
+
+                if (profilesUpdated) {
+                    await storageAdapter.put(KV_KEY_PROFILES, profiles);
+                    console.info(`[Telegram Push] Cleaned up ${deletedIds.length} node references from profiles`);
+                }
+            }
+        } catch (cleanupError) {
+            console.error('[Telegram Push] Cleanup profiles error:', cleanupError);
+        }
 
         let message = `✅ <b>已删除 ${deletedNames.length} 个节点</b>\n\n`;
         if (deletedNames.length <= 5) {
@@ -774,7 +887,7 @@ async function handleSubCommand(chatId, args, env, request) {
             );
 
             if (!profile) {
-                await sendTelegramMessage(chatId, `❌ 未找到名为 "<b>${args.join(' ')}</b>" 的订阅组`, env);
+                await sendTelegramMessage(chatId, `❌ 未找到名为 "<b>${escapeHtml(args.join(' '))}</b>" 的订阅组`, env);
                 return;
             }
 
@@ -813,7 +926,7 @@ async function handleSubCommand(chatId, args, env, request) {
 
     } catch (error) {
         console.error('[Telegram Push] Sub command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -860,7 +973,7 @@ async function handleSubCommandSimple(chatId, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Sub command simple failed:', error);
-        await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 获取订阅失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -914,7 +1027,7 @@ async function handleRenameCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Rename command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 重命名失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 重命名失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -986,7 +1099,7 @@ async function handleInfoCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Info command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 获取详情失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 获取详情失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1046,7 +1159,7 @@ async function handleCopyCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Copy command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 复制失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 复制失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1113,7 +1226,7 @@ async function handleExportCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Export command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 导出失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 导出失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1220,7 +1333,7 @@ async function handleImportCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Import command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 导入失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 导入失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1302,7 +1415,7 @@ async function handleSortCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Sort command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 排序失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 排序失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1379,7 +1492,7 @@ async function handleDupCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Dup command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 去重检测失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 去重检测失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1459,7 +1572,7 @@ async function handleBindCommand(chatId, userId, args, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Bind command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 绑定失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 绑定失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1490,7 +1603,7 @@ async function handleUnbindCommand(chatId, env) {
 
     } catch (error) {
         console.error('[Telegram Push] Unbind command failed:', error);
-        await sendTelegramMessage(chatId, `❌ 解除绑定失败: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ 解除绑定失败: ${escapeHtml(error.message)}`, env);
     }
 }
 
@@ -1508,13 +1621,31 @@ async function handleNodeInput(chatId, text, userId, env) {
             return createJsonResponse({ ok: true });
         }
 
-        // 提取节点链接
-        const nodeUrls = extractNodeUrls(text);
+        // 1. 尝试提取节点链接 (SS, VLESS 等)
+        let nodeUrls = extractNodeUrls(text);
+        let importType = 'node'; // node | subscription
+
+        // 2. 如果未识别到节点，检查是否为 HTTP/HTTPS 订阅链接
+        if (nodeUrls.length === 0) {
+            const trimmedText = text.trim();
+            if (/^https?:\/\//i.test(trimmedText)) {
+                // 简单的 URL 验证
+                try {
+                    new URL(trimmedText);
+                    nodeUrls = [trimmedText];
+                    importType = 'subscription';
+                } catch (e) {
+                    // 无效 URL，忽略
+                }
+            }
+        }
 
         if (nodeUrls.length === 0) {
             await sendTelegramMessage(chatId,
-                '❌ <b>未识别到有效的节点链接</b>\n\n' +
-                '支持的协议：SS, SSR, VMess, VLESS, Trojan, Hysteria, Hysteria2, TUIC, Snell\n\n' +
+                '❌ <b>未识别到有效的链接</b>\n\n' +
+                '支持的内容：\n' +
+                '1. 节点链接 (SS, VMess, VLESS, Hysteria, etc.)\n' +
+                '2. 订阅链接 (HTTP/HTTPS)\n\n' +
                 '发送 /help 查看使用帮助',
                 env
             );
@@ -1524,12 +1655,24 @@ async function handleNodeInput(chatId, text, userId, env) {
         const storageAdapter = await getStorageAdapter(env);
         const allSubscriptions = await storageAdapter.get(KV_KEY_SUBS) || [];
 
-        // 批量添加节点
+        // 3. 批量处理与去重
         const addedNodes = [];
+        const ignoredUrls = [];
+
         for (const url of nodeUrls) {
+            // 去重检测
+            const exists = allSubscriptions.some(sub => sub.url === url);
+            if (exists) {
+                ignoredUrls.push(url);
+                continue;
+            }
+
+            const isSubscription = /^https?:\/\//i.test(url);
+            const defaultName = isSubscription ? `订阅源 ${new URL(url).hostname}` : extractNodeName(url);
+
             const node = {
                 id: generateId(),
-                name: extractNodeName(url),
+                name: defaultName,
                 url: url,
                 enabled: true,
                 source: 'telegram',
@@ -1537,64 +1680,115 @@ async function handleNodeInput(chatId, text, userId, env) {
                 created_at: new Date().toISOString()
             };
 
+            // 注意：MiSub 中订阅源也通过 KV_KEY_SUBS 存储
+            // 前端通过 URL 格式区分是“手动节点”还是“订阅源”
+            // 订阅源 -> type: subscription or implied by http protocol
+
             allSubscriptions.unshift(node);
             addedNodes.push(node);
         }
 
+        if (addedNodes.length === 0) {
+            await sendTelegramMessage(chatId,
+                `⚠️ <b>未添加任何节点</b>\n\n` +
+                `检测到 ${ignoredUrls.length} 个重复链接，已自动忽略。`,
+                env
+            );
+            return createJsonResponse({ ok: true });
+        }
+
         await storageAdapter.put(KV_KEY_SUBS, allSubscriptions);
 
-        // 自动关联到订阅组
+        // [Verification] Read-Your-Writes Check
+        try {
+            const verifySubs = await storageAdapter.get(KV_KEY_SUBS) || [];
+            const isVerified = addedNodes.every(added => verifySubs.some(s => s.id === added.id));
+            if (!isVerified) {
+                console.warn('[Telegram Push] KV Verification failed');
+                throw new Error('KV Write Verification Failed. Please try again.');
+            }
+        } catch (verifyError) {
+            console.error('[Telegram Push] KV Verification error:', verifyError);
+            if (verifyError.message.includes('Verification Failed')) throw verifyError;
+        }
+
+        // 4. 自动关联到订阅组 (分类处理)
         let boundProfileName = '';
         if (config.auto_bind && config.default_profile_id) {
             const profiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
             const targetProfile = profiles.find(p => p.id === config.default_profile_id);
 
             if (targetProfile) {
-                // 将新节点 ID 添加到订阅组的 manualNodes
-                const nodeIds = addedNodes.map(n => n.id);
-                targetProfile.manualNodes = targetProfile.manualNodes || [];
-                targetProfile.manualNodes.push(...nodeIds);
+                // 分类 ID
+                const subIds = addedNodes.filter(n => /^https?:\/\//i.test(n.url)).map(n => n.id);
+                const nodeIds = addedNodes.filter(n => !/^https?:\/\//i.test(n.url)).map(n => n.id);
 
-                await storageAdapter.put(KV_KEY_PROFILES, profiles);
-                boundProfileName = targetProfile.name;
+                let updated = false;
+
+                if (nodeIds.length > 0) {
+                    targetProfile.manualNodes = targetProfile.manualNodes || [];
+                    targetProfile.manualNodes.push(...nodeIds);
+                    updated = true;
+                }
+
+                if (subIds.length > 0) {
+                    targetProfile.subscriptions = targetProfile.subscriptions || [];
+                    targetProfile.subscriptions.push(...subIds);
+                    updated = true;
+                }
+
+                if (updated) {
+                    await storageAdapter.put(KV_KEY_PROFILES, profiles);
+                    boundProfileName = targetProfile.name;
+                }
             }
         }
 
-        // 发送成功反馈
+        // 5. 发送反馈消息
         let message;
+        const totalIgnored = ignoredUrls.length;
+        const ignoreMsg = totalIgnored > 0 ? `\n⚠️ 已跳过 ${totalIgnored} 个重复链接` : '';
+
         if (addedNodes.length === 1) {
             const node = addedNodes[0];
-            message = `✅ <b>节点添加成功！</b>\n\n` +
-                `📋 节点信息：\n` +
-                `• 名称: ${node.name}\n` +
-                `• 协议: ${node.url.split('://')[0].toUpperCase()}`;
+            const isSub = /^https?:\/\//i.test(node.url);
+            const typeLabel = isSub ? '📡 订阅源' : '🚀 节点';
+
+            message = `✅ <b>${typeLabel}添加成功！</b>\n\n` +
+                `📋 信息：\n` +
+                `• 名称: ${escapeHtml(node.name)}\n` +
+                // 对于订阅源显示域名，对于节点显示协议
+                `• 类型: ${isSub ? new URL(node.url).hostname : node.url.split('://')[0].toUpperCase()}`;
+
             if (boundProfileName) {
-                message += `\n• 已关联: ${boundProfileName}`;
+                message += `\n• 已关联: ${escapeHtml(boundProfileName)}`;
             }
-            message += `\n\n💡 发送 /list 查看节点列表`;
+            message += ignoreMsg;
+            message += `\n\n💡 发送 /list 查看列表`;
         } else {
-            message = `✅ <b>成功添加 ${addedNodes.length} 个节点</b>\n\n`;
+            message = `✅ <b>成功添加 ${addedNodes.length} 个项目</b>${ignoreMsg}\n\n`;
             addedNodes.slice(0, 5).forEach((node, index) => {
-                const protocol = node.url.split('://')[0].toUpperCase();
-                message += `${index + 1}. ${node.name} (${protocol})\n`;
+                const isSub = /^https?:\/\//i.test(node.url);
+                const label = isSub ? '[订阅]' : `[${node.url.split('://')[0].toUpperCase()}]`;
+                message += `${index + 1}. ${escapeHtml(node.name)} ${label}\n`;
             });
             if (addedNodes.length > 5) {
-                message += `... 等 ${addedNodes.length} 个节点\n`;
+                message += `... 等 ${addedNodes.length} 个\n`;
             }
             if (boundProfileName) {
-                message += `\n🔗 已关联到: ${boundProfileName}`;
+                message += `\n🔗 已关联到: ${escapeHtml(boundProfileName)}`;
             }
             message += `\n📋 发送 /list 查看完整列表`;
         }
 
         await sendTelegramMessage(chatId, message, env);
-        console.info(`[Telegram Push] User ${userId} added ${addedNodes.length} nodes${boundProfileName ? ` to ${boundProfileName}` : ''}`);
+        console.info(`[Telegram Push] User ${userId} added ${addedNodes.length} items (Ignored ${totalIgnored})`);
 
         return createJsonResponse({ ok: true });
 
     } catch (error) {
         console.error('[Telegram Push] Node addition failed:', error);
-        await sendTelegramMessage(chatId, `❌ <b>添加失败</b>\n\n错误: ${error.message}`, env);
+        await sendTelegramMessage(chatId, `❌ <b>添加失败</b>\n\n错误: ${escapeHtml(error.message)}`, env);
         return createJsonResponse({ ok: true });
     }
 }
@@ -1719,18 +1913,34 @@ async function handleCallbackQuery(callbackQuery, env, request) {
 
     try {
         // 分页命令
+        // 分页命令 (格式: list_page_type_page 或 list_page_page 兼容旧版)
         if (data.startsWith('list_page_')) {
-            const page = parseInt(data.replace('list_page_', ''));
+            const parts = data.replace('list_page_', '').split('_');
+            let type = 'all';
+            let page = 0;
+
+            if (parts.length === 2 && isNaN(parseInt(parts[0]))) {
+                type = parts[0];
+                page = parseInt(parts[1]);
+            } else {
+                page = parseInt(parts[0]);
+            }
+
             await answerCallbackQuery(callbackQuery.id, '', env);
-            await handleListCommand(chatId, userId, env, page);
+            await handleListCommand(chatId, userId, env, page, type);
             return createJsonResponse({ ok: true });
         }
 
         // 快捷菜单命令
         switch (data) {
-            case 'cmd_list':
+            case 'cmd_list_node':
                 await answerCallbackQuery(callbackQuery.id, '', env);
-                await handleListCommand(chatId, userId, env, 0);
+                await handleListCommand(chatId, userId, env, 0, 'node');
+                break;
+
+            case 'cmd_list_sub':
+                await answerCallbackQuery(callbackQuery.id, '', env);
+                await handleListCommand(chatId, userId, env, 0, 'sub');
                 break;
 
             case 'cmd_stats':
@@ -1835,52 +2045,97 @@ async function handleCallbackQuery(callbackQuery, env, request) {
                     // 节点操作面板
                     const idx = parseInt(data.replace('node_action_', ''));
                     const storageAdapter = await getStorageAdapter(env);
-                    const userNodes = await getUserNodes(userId, env);
+                } else if (data.startsWith('node_action_')) {
+                    // 节点/订阅 详情展示
+                    // 格式: node_action_node_{idx} 或 node_action_sub_{idx}
+                    // 兼容旧格式: node_action_{idx} (默认为node)
+
+                    let type = 'node';
+                    let idxStr = '';
+                    if (data.startsWith('node_action_node_')) {
+                        type = 'node';
+                        idxStr = data.replace('node_action_node_', '');
+                    } else if (data.startsWith('node_action_sub_')) {
+                        type = 'sub';
+                        idxStr = data.replace('node_action_sub_', '');
+                    } else {
+                        idxStr = data.replace('node_action_', '');
+                    }
+
+                    const idx = parseInt(idxStr);
+                    const storageAdapter = await getStorageAdapter(env);
+
+                    // 获取对应列表
+                    let targetList = [];
+                    if (type === 'sub') {
+                        targetList = await storageAdapter.get(KV_KEY_SUBS) || [];
+                    } else {
+                        targetList = await getUserNodes(userId, env);
+                    }
+
                     const profiles = await storageAdapter.get(KV_KEY_PROFILES) || [];
                     const settings = await storageAdapter.get(KV_KEY_SETTINGS) || {};
                     const config = settings.telegram_push_config || {};
 
-                    if (idx < 0 || idx >= userNodes.length) {
-                        await answerCallbackQuery(callbackQuery.id, '节点不存在', env, true);
+                    if (idx < 0 || idx >= targetList.length) {
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
                         return createJsonResponse({ ok: true });
                     }
 
-                    const node = userNodes[idx];
+                    const node = targetList[idx];
                     const boundProfile = config.default_profile_id
                         ? profiles.find(p => p.id === config.default_profile_id)
                         : null;
+
+                    // Note: Manual nodes use 'id', subscriptions might not have 'id' in the same way or logic might differ.
+                    // Subscriptions usually have 'id' too.
                     const isInProfile = boundProfile?.manualNodes?.includes(node.id);
 
-                    const protocol = node.url.split('://')[0].toUpperCase();
-                    let message = `📋 <b>节点 #${idx + 1}</b>\n\n`;
-                    message += `名称: ${node.name}\n`;
+                    const protocol = (node.url || '').split('://')[0].toUpperCase();
+                    const typeLabel = type === 'sub' ? '订阅' : '节点';
+
+                    let message = `📋 <b>${typeLabel} #${idx + 1}</b>\n\n`;
+                    message += `名称: ${escapeHtml(node.name || '未命名')}\n`;
                     message += `协议: ${protocol}\n`;
                     message += `状态: ${node.enabled ? '✅ 启用' : '⛔ 禁用'}\n`;
-                    if (boundProfile) {
+
+                    // Only manual nodes are typically linked to profiles in this system context
+                    if (type === 'node' && boundProfile) {
                         message += `订阅组: ${isInProfile ? '🔗 已关联' : '未关联'}\n`;
                     }
 
                     // 构建操作按钮
-                    const buttons = [
-                        [
-                            { text: node.enabled ? '⛔ 禁用' : '✅ 启用', callback_data: `toggle_node_${idx}` },
-                            { text: '📋 复制', callback_data: `copy_node_${idx}` }
-                        ]
-                    ];
+                    const buttons = [];
 
-                    // 如果有绑定的订阅组，添加关联/取消关联按钮
-                    if (boundProfile) {
+                    // 第一行：启用/禁用，复制
+                    const toggleCmd = type === 'sub' ? `toggle_sub_${idx}` : `toggle_node_${idx}`;
+                    const copyCmd = type === 'sub' ? `copy_sub_${idx}` : `copy_node_${idx}`;
+
+                    buttons.push([
+                        { text: node.enabled ? '⛔ 禁用' : '✅ 启用', callback_data: toggleCmd },
+                        { text: '📋 复制', callback_data: copyCmd }
+                    ]);
+
+                    // 如果有绑定的订阅组，添加关联/取消关联按钮 (仅限节点)
+                    if (type === 'node' && boundProfile) {
                         buttons.push([{
                             text: isInProfile ? '➖ 从订阅组移除' : '➕ 添加到订阅组',
                             callback_data: isInProfile ? `unlink_node_${idx}` : `link_node_${idx}`
                         }]);
                     }
 
+                    // 第二行：重命名，删除
+                    const renameCmd = type === 'sub' ? `prompt_rename_sub_${idx}` : `prompt_rename_node_${idx}`;
+                    const deleteCmd = type === 'sub' ? `confirm_delete_sub_${idx}` : `confirm_delete_node_${idx}`;
+
                     buttons.push([
-                        { text: '✏️ 重命名', callback_data: `prompt_rename_${idx}` },
-                        { text: '🗑️ 删除', callback_data: `confirm_delete_${idx}` }
+                        { text: '✏️ 重命名', callback_data: renameCmd },
+                        { text: '🗑️ 删除', callback_data: deleteCmd }
                     ]);
-                    buttons.push([{ text: '◀️ 返回列表', callback_data: 'cmd_list' }]);
+
+                    // 返回列表
+                    const listCmd = type === 'sub' ? 'cmd_list_sub' : 'cmd_list_node';
+                    buttons.push([{ text: '◀️ 返回列表', callback_data: listCmd }]);
 
                     await answerCallbackQuery(callbackQuery.id, '', env);
                     await editTelegramMessage(chatId, messageId, message, env, {
@@ -1937,55 +2192,155 @@ async function handleCallbackQuery(callbackQuery, env, request) {
                         await answerCallbackQuery(callbackQuery.id, '操作失败', env, true);
                     }
 
+                } else if (data.startsWith('copy_sub_')) {
+                    const idx = parseInt(data.replace('copy_sub_', ''));
+                    const storageAdapter = await getStorageAdapter(env);
+                    const subs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                    if (idx >= 0 && idx < subs.length) {
+                        const subUrl = subs[idx].url;
+                        await answerCallbackQuery(callbackQuery.id, '已发送', env);
+                        await sendTelegramMessage(chatId, `📋 <b>订阅链接</b>\n\n<code>${escapeHtml(subUrl)}</code>`, env);
+                    } else {
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                    }
+
                 } else if (data.startsWith('copy_node_')) {
                     const idx = parseInt(data.replace('copy_node_', ''));
                     await answerCallbackQuery(callbackQuery.id, '', env);
                     await handleCopyCommand(chatId, userId, [(idx + 1).toString()], env);
 
-                } else if (data.startsWith('toggle_node_')) {
-                    const idx = parseInt(data.replace('toggle_node_', ''));
-                    const userNodes = await getUserNodes(userId, env);
-                    if (idx >= 0 && idx < userNodes.length) {
-                        const isEnabled = userNodes[idx].enabled;
+                } else if (data.startsWith('toggle_node_') || data.startsWith('toggle_sub_')) {
+                    const isSub = data.startsWith('toggle_sub_');
+                    const idx = parseInt(data.replace(isSub ? 'toggle_sub_' : 'toggle_node_', ''));
+                    const storageAdapter = await getStorageAdapter(env);
+
+                    let targetList = [];
+                    if (isSub) {
+                        targetList = await storageAdapter.get(KV_KEY_SUBS) || [];
+                    } else {
+                        targetList = await getUserNodes(userId, env);
+                    }
+
+                    if (idx >= 0 && idx < targetList.length) {
+                        const isEnabled = targetList[idx].enabled;
+                        // Toggle logic needs to know which list update.
+                        // For nodes, we use handleDisableCommand/handleEnableCommand which expects index in userNodes.
+                        // For subs, we need equivalent logic.
+
                         await answerCallbackQuery(callbackQuery.id, isEnabled ? '已禁用' : '已启用', env);
-                        if (isEnabled) {
-                            await handleDisableCommand(chatId, userId, [(idx + 1).toString()], env);
+
+                        if (isSub) {
+                            // Manual update for subscriptions
+                            targetList[idx].enabled = !isEnabled;
+                            await storageAdapter.put(KV_KEY_SUBS, targetList);
+                            // Refresh logic? Send command to update list view?
+                            // Updating the message (editTelegramMessage) is ideal but we need to reconstruct it.
+                            // For now, let's just trigger the list view refresh if possible, or simple confirmation.
+                            // Better: call handleListCommand again.
+                            await handleListCommand(chatId, userId, env, 0, 'sub');
                         } else {
-                            await handleEnableCommand(chatId, userId, [(idx + 1).toString()], env);
+                            // Valid for manual nodes
+                            if (isEnabled) {
+                                await handleDisableCommand(chatId, userId, [(idx + 1).toString()], env);
+                            } else {
+                                await handleEnableCommand(chatId, userId, [(idx + 1).toString()], env);
+                            }
                         }
                     } else {
-                        await answerCallbackQuery(callbackQuery.id, '节点不存在', env, true);
+                        await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
                     }
 
                 } else if (data.startsWith('confirm_delete_')) {
-                    const idx = parseInt(data.replace('confirm_delete_', ''));
+                    // Handles: confirm_delete_node_{idx}, confirm_delete_sub_{idx}, confirm_delete_{idx}
+                    let type = 'node';
+                    let idxStr = '';
+                    if (data.startsWith('confirm_delete_sub_')) {
+                        type = 'sub';
+                        idxStr = data.replace('confirm_delete_sub_', '');
+                    } else if (data.startsWith('confirm_delete_node_')) {
+                        type = 'node';
+                        idxStr = data.replace('confirm_delete_node_', '');
+                    } else {
+                        idxStr = data.replace('confirm_delete_', '');
+                    }
+                    const idx = parseInt(idxStr);
+
                     const confirmKeyboard = {
                         inline_keyboard: [
                             [
-                                { text: '⚠️ 确认删除', callback_data: `do_delete_${idx}` },
+                                { text: '⚠️ 确认删除', callback_data: `do_delete_${type}_${idx}` },
                                 { text: '❌ 取消', callback_data: 'cancel_action' }
                             ]
                         ]
                     };
-                    await answerCallbackQuery(callbackQuery.id, '', env);
-                    await editTelegramMessage(chatId, messageId,
-                        `⚠️ <b>确认删除节点 #${idx + 1}？</b>`,
-                        env, { reply_markup: confirmKeyboard }
-                    );
+                    await editTelegramMessage(chatId, messageId, '⚠️ <b>确认删除此对象吗？</b>\n此操作无法撤销。', env, {
+                        reply_markup: confirmKeyboard
+                    });
 
                 } else if (data.startsWith('do_delete_')) {
-                    const idx = parseInt(data.replace('do_delete_', ''));
-                    await answerCallbackQuery(callbackQuery.id, '正在删除...', env);
-                    await handleDeleteCommand(chatId, userId, [(idx + 1).toString()], env);
+                    // Handles: do_delete_node_{idx}, do_delete_sub_{idx}, do_delete_{idx}
+                    let type = 'node';
+                    let idxStr = '';
+                    if (data.startsWith('do_delete_sub_')) {
+                        type = 'sub';
+                        idxStr = data.replace('do_delete_sub_', '');
+                    } else if (data.startsWith('do_delete_node_')) {
+                        type = 'node';
+                        idxStr = data.replace('do_delete_node_', '');
+                    } else {
+                        idxStr = data.replace('do_delete_', '');
+                    }
+                    const idx = parseInt(idxStr);
+
+                    if (type === 'sub') {
+                        // Delete Subscription
+                        const storageAdapter = await getStorageAdapter(env);
+                        const subs = await storageAdapter.get(KV_KEY_SUBS) || [];
+                        if (idx >= 0 && idx < subs.length) {
+                            const deletedName = subs[idx].name;
+                            subs.splice(idx, 1);
+                            await storageAdapter.put(KV_KEY_SUBS, subs);
+                            await answerCallbackQuery(callbackQuery.id, '已删除', env);
+                            await sendTelegramMessage(chatId, `🗑️ 已删除订阅: <b>${escapeHtml(deletedName)}</b>`, env);
+                            await handleListCommand(chatId, userId, env, 0, 'sub');
+                        } else {
+                            await answerCallbackQuery(callbackQuery.id, '对象不存在', env, true);
+                        }
+                    } else {
+                        // Delete Node
+                        await answerCallbackQuery(callbackQuery.id, '正在删除...', env);
+                        await handleDeleteCommand(chatId, userId, [(idx + 1).toString()], env);
+                    }
 
                 } else if (data.startsWith('prompt_rename_')) {
-                    const idx = parseInt(data.replace('prompt_rename_', ''));
-                    await answerCallbackQuery(callbackQuery.id, '', env);
-                    await sendTelegramMessage(chatId,
-                        `✏️ 重命名节点 #${idx + 1}\n\n请发送：/rename ${idx + 1} [新名称]`,
-                        env
-                    );
+                    // Handles: prompt_rename_node_{idx}, prompt_rename_sub_{idx}, prompt_rename_{idx}
+                    let type = 'node';
+                    let idxStr = '';
+                    if (data.startsWith('prompt_rename_sub_')) {
+                        type = 'sub';
+                        idxStr = data.replace('prompt_rename_sub_', '');
+                    } else if (data.startsWith('prompt_rename_node_')) {
+                        type = 'node';
+                        idxStr = data.replace('prompt_rename_node_', '');
+                    } else {
+                        idxStr = data.replace('prompt_rename_', '');
+                    }
+                    const idx = parseInt(idxStr);
 
+                    // Store state? Ideally use ForceReply.
+                    // Simplified: Just tell user command
+                    const cmdPrefix = type === 'sub' ? '/set_sub_name' : '/rename';
+                    // Wait, do we have /set_sub_name? Probably not.
+                    // If no command exists for renaming subs via bot, we might need to add one or just say "Not supported via bot yet".
+                    // But for now, let's assume rename is only for nodes or implemented generically.
+                    // Checking implementation: handleRenameCommand usually takes indices.
+
+                    if (type === 'sub') {
+                        await answerCallbackQuery(callbackQuery.id, '暂不支持在 Bot 中重命名订阅', env, true);
+                    } else {
+                        await answerCallbackQuery(callbackQuery.id, '请发送新名称', env);
+                        await sendTelegramMessage(chatId, `请回复以下格式重命名:\n<code>/rename ${idx + 1} 新名称</code>`, env);
+                    }
                 } else if (data.startsWith('bind_profile_')) {
                     // 绑定订阅组
                     const profileId = data.replace('bind_profile_', '');
